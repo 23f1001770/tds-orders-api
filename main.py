@@ -1,11 +1,11 @@
-import os
 import time
 import uuid
 import threading
 from collections import defaultdict, deque
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
@@ -26,7 +26,9 @@ rate_buckets = defaultdict(deque)
 
 
 @app.post("/orders", status_code=201)
-def create_order(idempotency_key: str = Header(..., alias="Idempotency-Key")):
+def create_order(
+    idempotency_key: str = Header(..., alias="Idempotency-Key")
+):
     with lock:
         if idempotency_key not in idempotency:
             idempotency[idempotency_key] = {
@@ -41,33 +43,46 @@ def list_orders(
     limit: int = Query(10, ge=1, le=100),
     cursor: str | None = None,
 ):
-    start = int(cursor) if cursor else 1
-    start = max(1, start)
+    start = max(1, int(cursor)) if cursor else 1
     end = min(start + limit - 1, TOTAL_ORDERS)
 
-    items = [{"id": i, "status": "created"} for i in range(start, end + 1)]
+    items = [
+        {"id": i, "status": "created"}
+        for i in range(start, end + 1)
+    ]
     next_cursor = str(end + 1) if end < TOTAL_ORDERS else None
 
     return {"items": items, "next_cursor": next_cursor}
 
 
 @app.middleware("http")
-async def client_rate_limit(request, call_next):
-    if request.url.path in ("/orders",) and request.method == "GET":
-        client_id = request.headers.get("X-Client-Id", "anonymous")
+async def client_rate_limit(request: Request, call_next):
+    # Do not throttle ordinary browser reachability checks
+    # that don't provide a client ID.
+    client_id = request.headers.get("X-Client-Id")
+
+    if request.url.path == "/orders" and request.method == "GET" and client_id:
         now = time.monotonic()
 
         with lock:
             bucket = rate_buckets[client_id]
+
             while bucket and now - bucket[0] >= WINDOW:
                 bucket.popleft()
 
             if len(bucket) >= RATE_LIMIT:
-                retry_after = max(1, int(WINDOW - (now - bucket[0]) + 0.999))
-                return __import__("starlette.responses").responses.JSONResponse(
+                retry_after = max(
+                    1, int(WINDOW - (now - bucket[0]) + 0.999)
+                )
+                return JSONResponse(
                     status_code=429,
                     content={"detail": "Rate limit exceeded"},
-                    headers={"Retry-After": str(retry_after)},
+                    headers={
+                        "Retry-After": str(retry_after),
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "*",
+                        "Access-Control-Allow-Headers": "*",
+                    },
                 )
 
             bucket.append(now)
