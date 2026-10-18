@@ -61,7 +61,7 @@ async def client_rate_limit(request: Request, call_next):
     # that don't provide a client ID.
     client_id = request.headers.get("X-Client-Id")
 
-    if request.url.path == "/orders" and request.method == "GET" and client_id:
+    if request.url.path == "/orders" and request.method in ("GET", "POST") and client_id:
         now = time.monotonic()
 
         with lock:
@@ -87,7 +87,10 @@ async def client_rate_limit(request: Request, call_next):
 
             bucket.append(now)
 
-    return await call_next(request)
+    response = await call_next(request)
+if response.status_code == 429 and "Retry-After" not in response.headers:
+    response.headers["Retry-After"] = "10"
+return response
 
 
 @app.get("/health")
